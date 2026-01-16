@@ -104,12 +104,18 @@ def user_results():
     result = []
 
     for u in users:
+        if "option" in u:
+            voted = option_map[u["option"]]
+        else:
+            voted = "Not recorded (old data)"
+
         result.append({
             "username": u["username"],
-            "voted": option_map[u["option"]]
+            "voted": voted
         })
 
     return jsonify(result)
+
 
 # ---------------- START ----------------
 if __name__ == "__main__":
