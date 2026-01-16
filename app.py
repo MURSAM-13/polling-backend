@@ -18,7 +18,14 @@ votes_col = db.votes
 users_col = db.users
 
 MAX_VOTES = 100
-MAX_PER_OPTION = MAX_VOTES // 4   # 25 each
+MAX_PER_OPTION = MAX_VOTES // 4  # 25 per option
+
+OPTION_MAP = {
+    0: "Option A",
+    1: "Option B",
+    2: "Option C",
+    3: "Option D"
+}
 
 # ---------------- INITIALIZE VOTES ----------------
 if votes_col.count_documents({}) == 0:
@@ -58,10 +65,10 @@ def vote():
     if username is None or option is None:
         return jsonify(success=False, msg="Invalid request"), 400
 
-    if not (0 <= option < 4):
+    if option not in OPTION_MAP:
         return jsonify(success=False, msg="Invalid option")
 
-    # Check if user already voted
+    # One vote per user
     if users_col.find_one({"username": username}):
         return jsonify(success=False, msg="Already voted")
 
@@ -75,13 +82,13 @@ def vote():
     if vote_doc["count"] >= MAX_PER_OPTION:
         return jsonify(success=False, msg="Option vote limit reached")
 
-    # Increment vote
+    # Update vote count
     votes_col.update_one(
         {"option": option},
         {"$inc": {"count": 1}}
     )
 
-    # Store user + vote
+    # Store user + option
     users_col.insert_one({
         "username": username,
         "option": option
@@ -98,17 +105,11 @@ def results():
 # ---------- USER-WISE RESULTS ----------
 @app.route("/user-results")
 def user_results():
-    option_map = ["Option A", "Option B", "Option C", "Option D"]
-
     users = users_col.find({}, {"_id": 0})
     result = []
 
     for u in users:
-        if "option" in u:
-            voted = option_map[u["option"]]
-        else:
-            voted = "Not recorded (old data)"
-
+        voted = OPTION_MAP[u["option"]] if "option" in u else "Not recorded (old data)"
         result.append({
             "username": u["username"],
             "voted": voted
@@ -116,6 +117,28 @@ def user_results():
 
     return jsonify(result)
 
+# ---------- GROUPED RESULTS (YOUR REQUIREMENT) ----------
+@app.route("/grouped-results")
+def grouped_results():
+    grouped = {
+        "Option A": [],
+        "Option B": [],
+        "Option C": [],
+        "Option D": []
+    }
+
+    users = users_col.find({}, {"_id": 0})
+
+    for u in users:
+        if "option" in u:
+            opt_name = OPTION_MAP[u["option"]]
+            grouped[opt_name].append(u["username"])
+
+    # Optional: sort usernames
+    for k in grouped:
+        grouped[k].sort()
+
+    return jsonify(grouped)
 
 # ---------------- START ----------------
 if __name__ == "__main__":
