@@ -1,129 +1,74 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import sqlite3
-import threading
+from pymongo import MongoClient
+from dotenv import load_dotenv
 import os
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-DB_FILE = "poll.db"
-LOCK = threading.Lock()
+# ---------- MongoDB ----------
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI)
+db = client.polling
+votes_col = db.votes
+users_col = db.users
 
 MAX_VOTES = 100
 MAX_PER_OPTION = MAX_VOTES // 4
 
-# ---------- DATABASE INIT ----------
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS votes (
-            option_id INTEGER PRIMARY KEY,
-            count INTEGER
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY
-        )
-    """)
-
+# ---------- INIT ----------
+if votes_col.count_documents({}) == 0:
     for i in range(4):
-        cur.execute(
-            "INSERT OR IGNORE INTO votes (option_id, count) VALUES (?, ?)",
-            (i, 0)
-        )
-
-    conn.commit()
-    conn.close()
-
-init_db()
-
-# ---------- HELPERS ----------
-def get_db():
-    return sqlite3.connect(DB_FILE, check_same_thread=False)
+        votes_col.insert_one({"option": i, "count": 0})
 
 # ---------- ROUTES ----------
 @app.route("/")
 def home():
-    return "Polling Backend Running (SQLite) 🚀"
+    return "Polling Backend Running (MongoDB) 🚀"
 
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json(silent=True)
-    if not data or "username" not in data:
-        return jsonify(success=False, msg="Invalid request"), 400
+    data = request.get_json()
+    username = data.get("username")
 
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM users WHERE username=?", (data["username"],))
-    exists = cur.fetchone()
-    conn.close()
-
-    if exists:
+    if users_col.find_one({"username": username}):
         return jsonify(success=False, msg="User already voted")
 
     return jsonify(success=True)
 
 @app.route("/vote", methods=["POST"])
 def vote():
-    data = request.get_json(silent=True)
+    data = request.get_json()
     username = data["username"]
     option = data["option"]
 
-    with LOCK:
-        conn = get_db()
-        cur = conn.cursor()
+    if users_col.find_one({"username": username}):
+        return jsonify(success=False, msg="Already voted")
 
-        # Check user
-        cur.execute("SELECT 1 FROM users WHERE username=?", (username,))
-        if cur.fetchone():
-            conn.close()
-            return jsonify(success=False, msg="Already voted")
+    total_votes = sum(v["count"] for v in votes_col.find())
+    if total_votes >= MAX_VOTES:
+        return jsonify(success=False, msg="Total vote limit reached")
 
-        # Total votes
-        cur.execute("SELECT SUM(count) FROM votes")
-        total = cur.fetchone()[0]
+    vote_doc = votes_col.find_one({"option": option})
+    if vote_doc["count"] >= MAX_PER_OPTION:
+        return jsonify(success=False, msg="Option vote limit reached")
 
-        if total >= MAX_VOTES:
-            conn.close()
-            return jsonify(success=False, msg="Total vote limit reached")
-
-        # Option limit
-        cur.execute("SELECT count FROM votes WHERE option_id=?", (option,))
-        count = cur.fetchone()[0]
-
-        if count >= MAX_PER_OPTION:
-            conn.close()
-            return jsonify(success=False, msg="Option vote limit reached")
-
-        # Update
-        cur.execute(
-            "UPDATE votes SET count=count+1 WHERE option_id=?",
-            (option,)
-        )
-        cur.execute(
-            "INSERT INTO users VALUES (?)",
-            (username,)
-        )
-
-        conn.commit()
-        conn.close()
+    votes_col.update_one(
+        {"option": option},
+        {"$inc": {"count": 1}}
+    )
+    users_col.insert_one({"username": username})
 
     return jsonify(success=True)
 
 @app.route("/results")
 def results():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT count FROM votes ORDER BY option_id")
-    votes = [row[0] for row in cur.fetchall()]
-    conn.close()
-    return jsonify(votes)
+    data = votes_col.find().sort("option", 1)
+    return jsonify([v["count"] for v in data])
 
 # ---------- START ----------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(debug=True)
