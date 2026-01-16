@@ -1,69 +1,80 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import json
+import threading
 
 app = Flask(__name__)
 CORS(app)
 
-# ---------------- CONFIG ----------------
+LOCK = threading.Lock()
+
 MAX_VOTES = 100
 MAX_PER_OPTION = MAX_VOTES // 4
+VOTES_FILE = "votes.json"
+USERS_FILE = "users.json"
 
-votes = [0, 0, 0, 0]
-voted_users = set()
+def read_votes():
+    with open(VOTES_FILE, "r") as f:
+        return json.load(f)
 
-# ---------------- HEALTH CHECK ----------------
-@app.route("/", methods=["GET"])
+def write_votes(votes):
+    with open(VOTES_FILE, "w") as f:
+        json.dump(votes, f)
+
+def read_users():
+    try:
+        with open(USERS_FILE, "r") as f:
+            return set(json.load(f))
+    except:
+        return set()
+
+def write_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump(list(users), f)
+
+@app.route("/")
 def home():
-    return "Polling Backend Running 🚀", 200
+    return "Polling Backend Running 🚀"
 
-# ---------------- LOGIN ----------------
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json(silent=True)
-
+    data = request.get_json()
     if not data or "username" not in data:
-        return jsonify({"success": False, "msg": "Invalid request"}), 400
+        return jsonify(success=False, msg="Invalid request"), 400
 
-    username = data["username"]
+    users = read_users()
+    if data["username"] in users:
+        return jsonify(success=False, msg="User already voted")
 
-    if username in voted_users:
-        return jsonify({"success": False, "msg": "User already voted"})
+    return jsonify(success=True)
 
-    return jsonify({"success": True})
-
-# ---------------- VOTE ----------------
 @app.route("/vote", methods=["POST"])
 def vote():
-    data = request.get_json(silent=True)
-
-    if not data or "username" not in data or "option" not in data:
-        return jsonify({"success": False, "msg": "Invalid request"}), 400
-
+    data = request.get_json()
     username = data["username"]
     option = data["option"]
 
-    if username in voted_users:
-        return jsonify({"success": False, "msg": "Already voted"})
+    with LOCK:
+        votes = read_votes()
+        users = read_users()
 
-    if sum(votes) >= MAX_VOTES:
-        return jsonify({"success": False, "msg": "Total vote limit reached"})
+        if username in users:
+            return jsonify(success=False, msg="Already voted")
 
-    if not (0 <= option < 4):
-        return jsonify({"success": False, "msg": "Invalid option"}), 400
+        if sum(votes) >= MAX_VOTES:
+            return jsonify(success=False, msg="Total vote limit reached")
 
-    if votes[option] >= MAX_PER_OPTION:
-        return jsonify({"success": False, "msg": "Option limit reached"})
+        if votes[option] >= MAX_PER_OPTION:
+            return jsonify(success=False, msg="Option limit reached")
 
-    votes[option] += 1
-    voted_users.add(username)
+        votes[option] += 1
+        users.add(username)
 
-    return jsonify({"success": True})
+        write_votes(votes)
+        write_users(users)
 
-# ---------------- RESULTS (POLLING ENDPOINT) ----------------
-@app.route("/results", methods=["GET"])
+    return jsonify(success=True)
+
+@app.route("/results")
 def results():
-    return jsonify(votes)
-
-# ---------------- START ----------------
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    return jsonify(read_votes())
