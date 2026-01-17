@@ -15,9 +15,12 @@ client = MongoClient(MONGO_URI)
 
 db = client.polling
 users_col = db.users
+settings_col = db.settings
+
+ADMIN_KEY = "admin123"
 
 MAX_VOTES = 100
-MAX_PER_OPTION = MAX_VOTES // 4  # 25 per option
+MAX_PER_OPTION = MAX_VOTES // 4
 
 OPTION_MAP = {
     0: "Option A",
@@ -26,56 +29,78 @@ OPTION_MAP = {
     3: "Option D"
 }
 
+# ---------------- HELPER ----------------
+def poll_active():
+    s = settings_col.find_one({})
+    return s and s.get("poll_active", False)
+
 # ---------------- ROUTES ----------------
 
 @app.route("/")
 def home():
-    return "Polling Backend Running (MongoDB – Dynamic Count) 🚀"
+    return "Polling Backend with Admin Control 🚀"
+
+# ---------- ADMIN START ----------
+@app.route("/admin/start", methods=["POST"])
+def admin_start():
+    if request.json.get("key") != ADMIN_KEY:
+        return jsonify(success=False, msg="Unauthorized"), 403
+
+    settings_col.update_one({}, {"$set": {"poll_active": True}})
+    return jsonify(success=True, msg="Poll started")
+
+# ---------- ADMIN END ----------
+@app.route("/admin/end", methods=["POST"])
+def admin_end():
+    if request.json.get("key") != ADMIN_KEY:
+        return jsonify(success=False, msg="Unauthorized"), 403
+
+    settings_col.update_one({}, {"$set": {"poll_active": False}})
+    return jsonify(success=True, msg="Poll ended")
+
+# ---------- ADMIN RESET ----------
+@app.route("/admin/reset", methods=["POST"])
+def admin_reset():
+    if request.json.get("key") != ADMIN_KEY:
+        return jsonify(success=False, msg="Unauthorized"), 403
+
+    users_col.delete_many({})
+    settings_col.update_one({}, {"$set": {"poll_active": False}})
+    return jsonify(success=True, msg="Poll reset")
 
 # ---------- LOGIN ----------
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json()
-    username = data.get("username")
-
-    if not username:
-        return jsonify(success=False, msg="Username required"), 400
+    username = request.json.get("username")
 
     if users_col.find_one({"username": username}):
-        return jsonify(success=False, msg="User already voted")
+        return jsonify(success=False, msg="Already voted")
 
     return jsonify(success=True)
 
 # ---------- VOTE ----------
 @app.route("/vote", methods=["POST"])
 def vote():
-    data = request.get_json()
-    username = data.get("username")
-    option = data.get("option")
+    if not poll_active():
+        return jsonify(success=False, msg="Poll not active")
 
-    if username is None or option is None:
-        return jsonify(success=False, msg="Invalid request"), 400
+    username = request.json.get("username")
+    option = request.json.get("option")
 
     if option not in OPTION_MAP:
         return jsonify(success=False, msg="Invalid option")
 
-    # One vote per user
     if users_col.find_one({"username": username}):
         return jsonify(success=False, msg="Already voted")
 
-    # Get all votes dynamically
     users = list(users_col.find({}, {"option": 1}))
-    total_votes = len(users)
 
-    if total_votes >= MAX_VOTES:
+    if len(users) >= MAX_VOTES:
         return jsonify(success=False, msg="Total vote limit reached")
 
-    # Count votes per option
-    option_count = sum(1 for u in users if u.get("option") == option)
-    if option_count >= MAX_PER_OPTION:
-        return jsonify(success=False, msg="Option vote limit reached")
+    if sum(1 for u in users if u["option"] == option) >= MAX_PER_OPTION:
+        return jsonify(success=False, msg="Option limit reached")
 
-    # Store vote
     users_col.insert_one({
         "username": username,
         "option": option
@@ -83,52 +108,35 @@ def vote():
 
     return jsonify(success=True)
 
-# ---------- TOTAL RESULTS (DYNAMIC) ----------
+# ---------- RESULTS ----------
 @app.route("/results")
 def results():
     counts = [0, 0, 0, 0]
-
-    users = users_col.find({}, {"option": 1})
-    for u in users:
-        if "option" in u:
-            counts[u["option"]] += 1
-
+    for u in users_col.find({}, {"option": 1}):
+        counts[u["option"]] += 1
     return jsonify(counts)
 
-# ---------- USER-WISE RESULTS ----------
-@app.route("/user-results")
-def user_results():
-    users = users_col.find({}, {"_id": 0})
-    result = []
+# ---------- USER VOTE AFTER END ----------
+@app.route("/my-vote/<username>")
+def my_vote(username):
+    if poll_active():
+        return jsonify(success=False, msg="Poll still active")
 
-    for u in users:
-        voted = OPTION_MAP[u["option"]] if "option" in u else "Not recorded"
-        result.append({
-            "username": u["username"],
-            "voted": voted
-        })
+    user = users_col.find_one({"username": username})
+    if not user:
+        return jsonify(success=False, msg="No vote")
 
-    return jsonify(result)
+    return jsonify(
+        success=True,
+        voted=OPTION_MAP[user["option"]]
+    )
 
 # ---------- GROUPED RESULTS ----------
 @app.route("/grouped-results")
 def grouped_results():
-    grouped = {
-        "Option A": [],
-        "Option B": [],
-        "Option C": [],
-        "Option D": []
-    }
-
-    users = users_col.find({}, {"_id": 0})
-
-    for u in users:
-        if "option" in u:
-            grouped[OPTION_MAP[u["option"]]].append(u["username"])
-
-    for k in grouped:
-        grouped[k].sort()
-
+    grouped = {v: [] for v in OPTION_MAP.values()}
+    for u in users_col.find({}, {"username": 1, "option": 1}):
+        grouped[OPTION_MAP[u["option"]]].append(u["username"])
     return jsonify(grouped)
 
 # ---------------- START ----------------
