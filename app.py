@@ -14,7 +14,6 @@ MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 
 db = client.polling
-votes_col = db.votes
 users_col = db.users
 
 MAX_VOTES = 100
@@ -27,19 +26,11 @@ OPTION_MAP = {
     3: "Option D"
 }
 
-# ---------------- INITIALIZE VOTES ----------------
-if votes_col.count_documents({}) == 0:
-    for i in range(4):
-        votes_col.insert_one({
-            "option": i,
-            "count": 0
-        })
-
 # ---------------- ROUTES ----------------
 
 @app.route("/")
 def home():
-    return "Polling Backend Running (MongoDB) 🚀"
+    return "Polling Backend Running (MongoDB – Dynamic Count) 🚀"
 
 # ---------- LOGIN ----------
 @app.route("/login", methods=["POST"])
@@ -72,23 +63,19 @@ def vote():
     if users_col.find_one({"username": username}):
         return jsonify(success=False, msg="Already voted")
 
-    # Total vote limit
-    total_votes = sum(v["count"] for v in votes_col.find())
+    # Get all votes dynamically
+    users = list(users_col.find({}, {"option": 1}))
+    total_votes = len(users)
+
     if total_votes >= MAX_VOTES:
         return jsonify(success=False, msg="Total vote limit reached")
 
-    # Per-option limit
-    vote_doc = votes_col.find_one({"option": option})
-    if vote_doc["count"] >= MAX_PER_OPTION:
+    # Count votes per option
+    option_count = sum(1 for u in users if u.get("option") == option)
+    if option_count >= MAX_PER_OPTION:
         return jsonify(success=False, msg="Option vote limit reached")
 
-    # Update vote count
-    votes_col.update_one(
-        {"option": option},
-        {"$inc": {"count": 1}}
-    )
-
-    # Store user + option
+    # Store vote
     users_col.insert_one({
         "username": username,
         "option": option
@@ -96,11 +83,17 @@ def vote():
 
     return jsonify(success=True)
 
-# ---------- TOTAL RESULTS ----------
+# ---------- TOTAL RESULTS (DYNAMIC) ----------
 @app.route("/results")
 def results():
-    data = votes_col.find().sort("option", 1)
-    return jsonify([v["count"] for v in data])
+    counts = [0, 0, 0, 0]
+
+    users = users_col.find({}, {"option": 1})
+    for u in users:
+        if "option" in u:
+            counts[u["option"]] += 1
+
+    return jsonify(counts)
 
 # ---------- USER-WISE RESULTS ----------
 @app.route("/user-results")
@@ -109,7 +102,7 @@ def user_results():
     result = []
 
     for u in users:
-        voted = OPTION_MAP[u["option"]] if "option" in u else "Not recorded (old data)"
+        voted = OPTION_MAP[u["option"]] if "option" in u else "Not recorded"
         result.append({
             "username": u["username"],
             "voted": voted
@@ -117,7 +110,7 @@ def user_results():
 
     return jsonify(result)
 
-# ---------- GROUPED RESULTS (YOUR REQUIREMENT) ----------
+# ---------- GROUPED RESULTS ----------
 @app.route("/grouped-results")
 def grouped_results():
     grouped = {
@@ -131,10 +124,8 @@ def grouped_results():
 
     for u in users:
         if "option" in u:
-            opt_name = OPTION_MAP[u["option"]]
-            grouped[opt_name].append(u["username"])
+            grouped[OPTION_MAP[u["option"]]].append(u["username"])
 
-    # Optional: sort usernames
     for k in grouped:
         grouped[k].sort()
 
